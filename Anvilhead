@@ -1,0 +1,2066 @@
+plugins {
+    id 'fabric-loom' version '1.8-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+base { archivesName = project.archives_base_name }
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") { expand "version": project.version }
+}
+
+tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+org.gradle.jvmargs=-Xmx2G
+minecraft_version=1.21.1
+yarn_mappings=1.21.1+build.3
+loader_version=0.16.9
+fabric_version=0.115.0+1.21.1
+mod_version=1.0.0
+maven_group=com.example
+archives_base_name=anvilhead
+
+# Anvilhead (Fabric, Minecraft 1.21.1)
+
+A tall silent stalker. Built from the reference silhouette: huge flat slab head, tiny pale eyes, thin neck.
+
+## Behavior
+- **Spawns** (custom spawner, ONE in the whole server at a time, avg. every ~7 min while conditions hold):
+  forest at night only (daytime storms don't count), or a dark cave (light level 3 or less). In caves it scans ~80 candidate spots and picks the darkest one it can find that is hidden from the player. Always hidden from the player.
+- **Stalks**: stays ~20 blocks away, picks spots hidden from your line of sight, preferably beside a tree trunk
+  or in dark cave corners. Silent footsteps; faint heartbeat when close.
+- **Looked at**: freezes. Stared at ~4.5 s: vanishes in smoke.
+- **Attacks (rare)**: after 45 s alive, roughly 1% per second while you are in low light, not looking, within 26 blocks.
+  It rushes at faster-than-sprint speed, hits once (8 dmg + Darkness + Slowness) and disappears.
+- Any hit on it while stalking makes it vanish. Leaves after 6 minutes.
+
+## Tuning
+Constants at the top of `AnvilheadEntity` (RUSH_ODDS, STARE_LIMIT, MAX_LIFETIME ...) and `AnvilheadSpawner` (SPAWN_ODDS).
+
+## Testing
+`/summon anvilhead:anvilhead` or use the spawn egg (Spawn Eggs tab).
+
+## Pitch-black darkness (client mixin)
+`LightmapTextureManagerMixin` makes the Overworld pitch black wherever there is no real light source.
+The body is lit only by the (now black) lightmap, so it disappears; the eyes use a fullbright layer, so they stay visible.
+Tune `DARK_FLOOR` / `FULL_BRIGHT` at the top of the mixin. Night Vision still lets you see.
+
+## Chase cutscene
+When it decides to attack (rare roll, you're in low light and not looking), it does NOT just run at you:
+1. If it was hiding, it appears 12-20 blocks in front of you with a clear line of sight to its face.
+2. **Cutscene (5.5 s):** movement and mouse are locked, the camera whips onto its face and zooms in.
+   Heartbeat for 1.5 s, then it ROARS (head thrown back, arms wide, camera shake).
+3. **Chase:** controls return, the chase theme (`sounds/chase_theme.ogg`) starts, and it hunts you at ~sprint speed
+   for up to 2:37 (the length of the theme). One strike ends it (it vanishes and the music fades out). If it gives up or you get away, same.
+Tune: `ChaseSequence` (timings), `AnvilheadEntity.CHASE_SPEED`, `CHASE_TIMEOUT`.
+To swap the music: replace `assets/anvilhead/sounds/chase_theme.ogg` (OGG Vorbis).
+
+## Chase screen effects
+From the moment the chase starts (not during the cutscene): the camera shakes (rumble + hard jolts, visual only, aim is unaffected)
+and an opaque jagged black border with black/white glitch blocks and scanline tears eats into your vision.
+Both ramp in over 0.5 s, get stronger the closer it is, and fade out when it vanishes.
+Tune in `ChaseOverlay` (border thickness, block counts) and `ChaseClient.shakeOffsets` (shake strength).
+
+## Size and the "peeking" night spawn
+- The Anvilhead is now **4 blocks tall** (hitbox 0.8 x 4.0, model scaled to match). It needs 4 blocks of headroom,
+  so it can only stand in cave passages that are at least 4 tall.
+- **Night / surface:** it only spawns behind the **shortest tree trunk that is at least 5 blocks tall** (scan of the ring 18-40
+  blocks around you), just behind it and slightly off-centre so its wide slab head and part of its face poke out past the trunk.
+  It never moves; it just turns to face you. Look **directly at its head** (crosshair on the head, clear line of sight,
+  ~0.25 s) and it steps out from behind the tree and the cutscene + chase begin. It leaves at dawn, or after 2.5 min
+  if you never look at it.
+- **Caves:** unchanged (darkest hidden spot, freezes when watched, vanishes if stared at, rare random chase).
+
+## The eyes event (1 in a trillion, every tick)
+Every server tick, every Overworld player rolls a **1 in 1,000,000,000,000** chance (`EyeEventManager.ODDS`). If it hits:
+1. Eyes (`textures/gui/eye.png`) open on that player's screen **one after another**. The first comes after 2 s, then every ~5 s;
+   each gap is 6% shorter than the last (minimum 3 ticks), so it starts slow and speeds up. Each eye has a heartbeat that gets louder.
+   50 eyes take about 80 s (`EyeSequence`).
+2. After the 50th eye there is a 2 s pause, then a **shockwave**: white-out flash, expanding rings from the centre of the screen
+   that wipe the eyes away (eyes just ahead of the ring get shoved outward), FOV snap + camera shake, sonic boom.
+3. At that moment an Anvilhead spawns **~50 blocks away, day or night, surface or underground** and the **chase starts immediately**
+   (roar + chase theme, no cutscene). Any existing Anvilhead is removed first (still max one). If no valid spot is found
+   it retries for 10 s and tapers the distance in (50 -> 40 -> 25 -> 10 blocks).
+The event is cancelled if the player dies, leaves the Overworld, or the difficulty is Peaceful. Only one event runs at a time.
+
+**Testing** (op level 2): `/anvilhead eyes` starts the eyes event on you; `/anvilhead chase` skips straight to the 50-block chase spawn.
+Tune: `EyeSequence` (timing, 0.94 = speed-up rate), `EyeEventClient` (eye size/layout, shockwave look).
+Note: the shockwave is drawn as a HUD overlay (rings, flash, FOV kick, shake), not a true refraction shader.
+
+pluginManagement {
+    repositories {
+        maven { url = 'https://maven.fabricmc.net/' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+build/
+.gradle/
+.idea/
+run/
+*.iml
+name: Build mod jar
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+      - run: gradle build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anvilhead-jar
+          path: build/libs/anvilhead-1.0.0.jar
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.anvilhead.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [],
+  "client": [
+    "LightmapTextureManagerMixin",
+    "KeyboardInputMixin",
+    "EntityLookMixin",
+    "GameRendererMixin",
+    "CameraMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+{
+  "schemaVersion": 1,
+  "id": "anvilhead",
+  "version": "${version}",
+  "name": "Anvilhead",
+  "description": "A tall, silent thing that watches you from behind trees and from the deepest dark of caves. It almost never attacks.",
+  "authors": [
+    "You"
+  ],
+  "license": "MIT",
+  "icon": "assets/anvilhead/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.example.anvilhead.AnvilheadMod"
+    ],
+    "client": [
+      "com.example.anvilhead.client.AnvilheadClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "mixins": [
+    {
+      "config": "anvilhead.client.mixins.json",
+      "environment": "client"
+    }
+  ]
+}
+{
+  "chase_theme": {
+    "category": "music",
+    "sounds": [
+      { "name": "anvilhead:chase_theme", "stream": true }
+    ]
+  }
+}
+{
+  "entity.anvilhead.anvilhead": "The Anvilhead",
+  "item.anvilhead.anvilhead_spawn_egg": "Anvilhead Spawn Egg"
+}
+{ "parent": "minecraft:item/template_spawn_egg" }
+package com.example.anvilhead;
+
+/**
+ * Timeline of the "eyes" event (ticks, 20 = 1 s), shared by the server (which decides when the event ends)
+ * and the client (which draws the eyes) so they stay in sync.
+ *
+ * Eye 1 appears after 2 s, then every ~5 s, and the gap shrinks by 6% per eye down to 3 ticks, so the screen
+ * fills slowly at first and then faster and faster. 50 eyes take roughly 80 seconds.
+ */
+public final class EyeSequence {
+    public static final int EYES = 50;
+    /** Pause after the last eye before the shockwave. */
+    public static final int HOLD_AFTER_LAST = 40;
+    /** How long the shockwave animation plays on the client. */
+    public static final int SHOCK_LENGTH = 50;
+
+    private static final int[] APPEAR = new int[EYES];
+    static {
+        double gap = 100;      // ticks between eye 1 and eye 2
+        int t = 40;            // eye 1
+        for (int i = 0; i < EYES; i++) {
+            APPEAR[i] = t;
+            t += Math.max(3, (int) Math.round(gap));
+            gap *= 0.94;       // each gap is 6% shorter than the last
+        }
+    }
+
+    private EyeSequence() {}
+
+    /** Tick (since the event started) at which eye {@code i} (0-based) appears. */
+    public static int appearTick(int i) { return APPEAR[i]; }
+
+    /** The tick at which the shockwave hits and the monster is released. */
+    public static int shockwaveTick() { return APPEAR[EYES - 1] + HOLD_AFTER_LAST; }
+
+    /** How many eyes are showing after {@code ticks} ticks. */
+    public static int eyesVisible(int ticks) {
+        int n = 0;
+        while (n < EYES && APPEAR[n] <= ticks) n++;
+        return n;
+    }
+}
+
+package com.example.anvilhead;
+
+import com.example.anvilhead.entity.AnvilheadEntity;
+import com.example.anvilhead.entity.AnvilheadSpawner;
+import com.example.anvilhead.event.EyeEventManager;
+import com.example.anvilhead.net.ChasePhasePayload;
+import com.example.anvilhead.net.EyeEventPayload;
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
+import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
+import net.minecraft.entity.EntityType;
+import net.minecraft.entity.SpawnGroup;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemGroups;
+import net.minecraft.item.SpawnEggItem;
+import net.minecraft.registry.Registries;
+import net.minecraft.registry.Registry;
+import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.text.Text;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.util.Identifier;
+
+public class AnvilheadMod implements ModInitializer {
+    public static final String MOD_ID = "anvilhead";
+
+    public static final EntityType<AnvilheadEntity> ANVILHEAD = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "anvilhead"),
+            EntityType.Builder.create(AnvilheadEntity::new, SpawnGroup.MONSTER)
+                    .dimensions(0.8f, 4.0f)    // 4 blocks tall
+                    .maxTrackingRange(8)
+                    .build("anvilhead"));
+
+    public static final Item ANVILHEAD_SPAWN_EGG = Registry.register(
+            Registries.ITEM,
+            Identifier.of(MOD_ID, "anvilhead_spawn_egg"),
+            new SpawnEggItem(ANVILHEAD, 0x0D0D0D, 0xE6E6DC, new Item.Settings()));
+
+    public static final SoundEvent CHASE_THEME = Registry.register(
+            Registries.SOUND_EVENT,
+            Identifier.of(MOD_ID, "chase_theme"),
+            SoundEvent.of(Identifier.of(MOD_ID, "chase_theme")));
+
+    @Override
+    public void onInitialize() {
+        PayloadTypeRegistry.playS2C().register(ChasePhasePayload.ID, ChasePhasePayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(EyeEventPayload.ID, EyeEventPayload.CODEC);
+        FabricDefaultAttributeRegistry.register(ANVILHEAD, AnvilheadEntity.createAttributes());
+        ItemGroupEvents.modifyEntriesEvent(ItemGroups.SPAWN_EGGS).register(e -> e.add(ANVILHEAD_SPAWN_EGG));
+        ServerTickEvents.END_WORLD_TICK.register(AnvilheadSpawner::tick);
+        ServerTickEvents.END_WORLD_TICK.register(EyeEventManager::tick);
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STOPPING.register(server -> EyeEventManager.reset());
+
+        // Test commands (op level 2): /anvilhead eyes  -> start the eyes event on yourself
+        //                             /anvilhead chase -> spawn it 50 blocks away and start a chase right now
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
+                dispatcher.register(CommandManager.literal("anvilhead")
+                        .requires(src -> src.hasPermissionLevel(2))
+                        .then(CommandManager.literal("eyes").executes(ctx -> {
+                            ServerPlayerEntity p = ctx.getSource().getPlayerOrThrow();
+                            if (EyeEventManager.trigger(p)) {
+                                ctx.getSource().sendFeedback(() -> Text.literal("The eyes are opening..."), false);
+                                return 1;
+                            }
+                            ctx.getSource().sendError(Text.literal("Can't start now (already running, not in the Overworld, or Peaceful)."));
+                            return 0;
+                        }))
+                        .then(CommandManager.literal("chase").executes(ctx -> {
+                            ServerPlayerEntity p = ctx.getSource().getPlayerOrThrow();
+                            if (p.getWorld() instanceof net.minecraft.server.world.ServerWorld w && AnvilheadSpawner.spawnChaser(w, p)) {
+                                return 1;
+                            }
+                            ctx.getSource().sendError(Text.literal("No valid spot found."));
+                            return 0;
+                        }))));
+
+        // Hard cap of one: if a second one ever loads in (spawn egg, /summon, chunk reload), it is removed.
+        ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
+            if (entity instanceof AnvilheadEntity && AnvilheadSpawner.anyExists(world.getServer(), entity)) {
+                world.getServer().execute(entity::discard);
+            }
+        });
+    }
+}
+
+package com.example.anvilhead;
+
+/** Timings (in ticks, 20 = 1 s) shared by the server entity and the client cutscene so they stay in sync. */
+public final class ChaseSequence {
+    /** Total length of the cutscene: camera locked, player can't move. */
+    public static final int CUTSCENE_LENGTH = 110;
+    /** When the roar begins. Before this: silent zoom-in on the face with a heartbeat. */
+    public static final int ROAR_START = 30;
+    private ChaseSequence() {}
+}
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.AnvilheadMod;
+import com.example.anvilhead.EyeSequence;
+import com.example.anvilhead.net.EyeEventPayload;
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderTickCounter;
+import net.minecraft.client.sound.PositionedSoundInstance;
+import net.minecraft.sound.SoundEvents;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.Util;
+import net.minecraft.util.math.MathHelper;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Random;
+
+/**
+ * Client side of the eyes event: eyes open on your screen one after another (slow, then faster) until there are 50,
+ * then a shockwave rolls outward from the centre of the screen, wiping them away while the view kicks and shakes.
+ */
+public final class EyeEventClient {
+    private static final Identifier EYE = Identifier.of(AnvilheadMod.MOD_ID, "textures/gui/eye.png");
+    private static final int TEX_W = 208, TEX_H = 128;
+
+    private static boolean active;
+    private static int ticks;            // ticks since START
+    private static int shockTicks = -1;  // -1 = shockwave hasn't happened yet
+    private static int seed;
+    private static int soundsPlayed;
+
+    private EyeEventClient() {}
+
+    public static void init() {
+        ClientPlayNetworking.registerGlobalReceiver(EyeEventPayload.ID, (payload, context) -> {
+            switch (payload.phase()) {
+                case EyeEventPayload.START -> {
+                    reset();
+                    active = true;
+                    seed = payload.seed();
+                }
+                case EyeEventPayload.SHOCKWAVE -> {
+                    if (!active) { active = true; seed = payload.seed(); }
+                    shockTicks = 0;
+                }
+                default -> reset();
+            }
+        });
+        ClientTickEvents.END_CLIENT_TICK.register(EyeEventClient::tick);
+        HudRenderCallback.EVENT.register(EyeEventClient::render);
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> reset());
+    }
+
+    private static void reset() {
+        active = false;
+        ticks = 0;
+        shockTicks = -1;
+        soundsPlayed = 0;
+    }
+
+    private static void tick(MinecraftClient mc) {
+        if (!active) return;
+        if (mc.player == null || mc.world == null) { reset(); return; }
+
+        if (shockTicks >= 0) {
+            if (++shockTicks > EyeSequence.SHOCK_LENGTH) reset();
+            return;
+        }
+        ticks++;
+
+        // a heartbeat for every new eye: gets louder, deeper and (because the gaps shrink) faster
+        int n = EyeSequence.eyesVisible(ticks);
+        while (soundsPlayed < n) {
+            float f = soundsPlayed / (float) (EyeSequence.EYES - 1);
+            mc.getSoundManager().play(PositionedSoundInstance.master(
+                    SoundEvents.ENTITY_WARDEN_HEARTBEAT, 0.55f + 0.7f * f, 0.35f + 0.65f * f));
+            soundsPlayed++;
+        }
+    }
+
+    /** 0..1 progress of the shockwave, or -1 if it hasn't happened. */
+    private static float shockProgress(float tickDelta) {
+        if (!active || shockTicks < 0) return -1f;
+        return MathHelper.clamp((shockTicks + tickDelta) / EyeSequence.SHOCK_LENGTH, 0f, 1f);
+    }
+
+    // ---- view effects (called from the mixins) ----
+
+    /** The field of view snaps, then rubber-bands back, as the shockwave passes. */
+    public static double applyFov(double fov, float tickDelta) {
+        float t = shockProgress(tickDelta);
+        if (t < 0f) return fov;
+        double wobble = Math.exp(-4.0 * t) * Math.sin(t * 22.0);
+        return fov * (1.0 - 0.28 * wobble);
+    }
+
+    /** Hard camera shake at the moment of impact that dies out. {yaw, pitch} offsets in degrees, or null. */
+    public static float[] shakeOffsets(float tickDelta) {
+        float t = shockProgress(tickDelta);
+        if (t < 0f || t > 0.6f) return null;
+        float a = (1f - t / 0.6f) * 3.0f;
+        double time = Util.getMeasuringTimeMs() / 1000.0;
+        float yaw = (float) (Math.sin(time * 55.0) * 0.6 + Math.sin(time * 91.0 + 1.0) * 0.4);
+        float pitch = (float) (Math.sin(time * 63.0 + 2.0) * 0.6 + Math.sin(time * 83.0) * 0.4);
+        return new float[]{yaw * a, pitch * a};
+    }
+
+    // ---- HUD ----
+
+    private static void render(DrawContext ctx, RenderTickCounter counter) {
+        if (!active) return;
+        float td = counter.getTickDelta(false);
+        int w = ctx.getScaledWindowWidth();
+        int h = ctx.getScaledWindowHeight();
+        float cx = w / 2f, cy = h / 2f;
+        float maxR = (float) Math.sqrt(cx * cx + cy * cy);
+        float shock = shockProgress(td);
+        float ringR = shock < 0f ? -1f : shock * maxR * 1.15f;
+
+        // jittered grid with enough cells for all the eyes, in a seeded random order so they pop up all over the screen
+        int rows = Math.max(1, Math.round((float) Math.sqrt(EyeSequence.EYES * (double) h / w)));
+        int cols = (int) Math.ceil(EyeSequence.EYES / (double) rows);
+        float cellW = w / (float) cols, cellH = h / (float) rows;
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < cols * rows; i++) order.add(i);
+        Collections.shuffle(order, new Random(seed));
+        Random r = new Random(seed * 31L + 7L);
+        double time = Util.getMeasuringTimeMs() / 1000.0;
+
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        for (int i = 0; i < EyeSequence.EYES; i++) {
+            int cell = order.get(i);
+            // always draw the random numbers in the same order so every eye keeps its place from frame to frame
+            float ex = (cell % cols + 0.5f + (r.nextFloat() - 0.5f) * 0.6f) * cellW;
+            float ey = (cell / cols + 0.5f + (r.nextFloat() - 0.5f) * 0.6f) * cellH;
+            float ew = cellW * (1.25f + r.nextFloat() * 0.55f);
+            float eh = ew * TEX_H / (float) TEX_W;
+
+            float alpha = shock >= 0f ? 1f : MathHelper.clamp((ticks + td - EyeSequence.appearTick(i)) / 8f, 0f, 1f);
+            if (alpha <= 0f) continue;
+
+            ex += (float) Math.sin(time * 1.3 + i) * 1.5f;   // faint restless drift
+            ey += (float) Math.cos(time * 1.1 + i * 2.0) * 1.0f;
+
+            if (shock >= 0f) {
+                float dx = ex - cx, dy = ey - cy;
+                float dist = Math.max(1f, (float) Math.sqrt(dx * dx + dy * dy));
+                if (dist < ringR) continue;                                  // the wave has already passed: gone
+                float push = (float) Math.exp(-(dist - ringR) / (maxR * 0.12f));
+                ex += dx / dist * push * 30f;                                // eyes just ahead of the wave get shoved outward
+                ey += dy / dist * push * 30f;
+                ew *= 1f + push * 0.25f;
+                eh *= 1f + push * 0.25f;
+            }
+
+            RenderSystem.setShaderColor(1f, 1f, 1f, alpha);
+            ctx.drawTexture(EYE, Math.round(ex - ew / 2f), Math.round(ey - eh / 2f), Math.round(ew), Math.round(eh),
+                    0f, 0f, TEX_W, TEX_H, TEX_W, TEX_H);
+        }
+        RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+        RenderSystem.disableBlend();
+
+        if (shock < 0f) return;
+
+        // the shockwave: a bright leading edge followed by alternating dark / light bands
+        float fade = 1f - shock * 0.8f;
+        float band = Math.max(6f, maxR * 0.025f);
+        int[] rgb = {0xFFFFFF, 0x000000, 0xFFFFFF, 0x000000, 0xFFFFFF, 0x000000};
+        float[] a = {0.70f, 0.55f, 0.30f, 0.40f, 0.15f, 0.25f};
+        for (int k = 0; k < rgb.length; k++) {
+            float outer = ringR - k * band;
+            if (outer <= 0f) break;
+            ring(ctx, w, h, cx, cy, outer, band, ((int) (a[k] * fade * 255f) << 24) | rgb[k]);
+        }
+
+        // white-out at the moment of impact
+        if (shock < 0.12f) {
+            int al = (int) ((1f - shock / 0.12f) * 0.9f * 255f);
+            ctx.fill(0, 0, w, h, (al << 24) | 0xFFFFFF);
+        }
+    }
+
+    /** A ring (annulus) built out of horizontal spans, 2 px tall each. */
+    private static void ring(DrawContext ctx, int w, int h, float cx, float cy, float outer, float thick, int argb) {
+        float inner = Math.max(0f, outer - thick);
+        for (int y = 0; y < h; y += 2) {
+            float dy = y + 1 - cy;
+            if (Math.abs(dy) >= outer) continue;
+            float xo = (float) Math.sqrt(outer * outer - dy * dy);
+            if (Math.abs(dy) < inner) {
+                float xi = (float) Math.sqrt(inner * inner - dy * dy);
+                span(ctx, w, y, cx - xo, cx - xi, argb);
+                span(ctx, w, y, cx + xi, cx + xo, argb);
+            } else {
+                span(ctx, w, y, cx - xo, cx + xo, argb);
+            }
+        }
+    }
+
+    private static void span(DrawContext ctx, int w, int y, float x0, float x1, int argb) {
+        int a = Math.max(0, (int) x0), b = Math.min(w, (int) x1);
+        if (b > a) ctx.fill(a, y, b, y + 2, argb);
+    }
+}
+
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.AnvilheadMod;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.rendering.v1.EntityModelLayerRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
+import net.minecraft.client.render.entity.model.EntityModelLayer;
+import net.minecraft.util.Identifier;
+
+public class AnvilheadClient implements ClientModInitializer {
+    public static final EntityModelLayer MODEL_LAYER =
+            new EntityModelLayer(Identifier.of(AnvilheadMod.MOD_ID, "anvilhead"), "main");
+
+    @Override
+    public void onInitializeClient() {
+        EntityModelLayerRegistry.registerModelLayer(MODEL_LAYER, AnvilheadModel::getTexturedModelData);
+        EntityRendererRegistry.register(AnvilheadMod.ANVILHEAD, AnvilheadRenderer::new);
+        ChaseClient.init();
+        EyeEventClient.init();
+    }
+}
+
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.AnvilheadMod;
+import com.example.anvilhead.entity.AnvilheadEntity;
+import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.entity.feature.EyesFeatureRenderer;
+import net.minecraft.client.render.entity.feature.FeatureRendererContext;
+import net.minecraft.util.Identifier;
+
+/** Makes the two pale eyes glow in total darkness (same trick as Enderman / Spider eyes). */
+public class AnvilheadEyesFeature extends EyesFeatureRenderer<AnvilheadEntity, AnvilheadModel> {
+    private static final RenderLayer EYES = RenderLayer.getEyes(
+            Identifier.of(AnvilheadMod.MOD_ID, "textures/entity/anvilhead_eyes.png"));
+
+    public AnvilheadEyesFeature(FeatureRendererContext<AnvilheadEntity, AnvilheadModel> context) {
+        super(context);
+    }
+
+    @Override
+    public RenderLayer getEyesTexture() { return EYES; }
+}
+
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.entity.AnvilheadEntity;
+import net.minecraft.client.model.*;
+import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.render.entity.model.EntityModel;
+import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.util.math.MathHelper;
+
+/**
+ * Silhouette from the reference image: a huge flat slab of a head, a face wedge with two tiny eyes,
+ * a thin neck, broad shoulders and long arms. Texture is 128x64.
+ * Model space: y = 24 is the ground, so higher parts have more negative y.
+ */
+public class AnvilheadModel extends EntityModel<AnvilheadEntity> {
+    private final ModelPart root, head, leftArm, rightArm, leftLeg, rightLeg;
+
+    public AnvilheadModel(ModelPart root) {
+        this.root = root;
+        this.head = root.getChild("head");
+        this.leftArm = root.getChild("left_arm");
+        this.rightArm = root.getChild("right_arm");
+        this.leftLeg = root.getChild("left_leg");
+        this.rightLeg = root.getChild("right_leg");
+    }
+
+    public static TexturedModelData getTexturedModelData() {
+        ModelData data = new ModelData();
+        ModelPartData r = data.getRoot();
+
+        // slab (the anvil top) + face wedge below it; eyes are painted on the face's front
+        r.addChild("head", ModelPartBuilder.create()
+                .uv(0, 0).cuboid(-14f, -5f, -5f, 28f, 5f, 10f)
+                .uv(0, 16).cuboid(-5f, 0f, -4f, 10f, 8f, 8f),
+                ModelTransform.pivot(0f, -26f, 0f));
+
+        r.addChild("neck", ModelPartBuilder.create()
+                .uv(40, 16).cuboid(-2f, 0f, -2f, 4f, 4f, 4f),
+                ModelTransform.pivot(0f, -18f, 0f));
+
+        r.addChild("torso", ModelPartBuilder.create()
+                .uv(0, 40).cuboid(-6f, 0f, -3f, 12f, 16f, 6f),
+                ModelTransform.pivot(0f, -14f, 0f));
+
+        r.addChild("left_arm", ModelPartBuilder.create()
+                .uv(40, 32).cuboid(-1.5f, 0f, -1.5f, 3f, 26f, 3f),
+                ModelTransform.pivot(7.5f, -12f, 0f));
+        r.addChild("right_arm", ModelPartBuilder.create()
+                .uv(56, 32).cuboid(-1.5f, 0f, -1.5f, 3f, 26f, 3f),
+                ModelTransform.pivot(-7.5f, -12f, 0f));
+
+        r.addChild("left_leg", ModelPartBuilder.create()
+                .uv(80, 32).cuboid(-1.5f, 0f, -1.5f, 3f, 22f, 3f),
+                ModelTransform.pivot(2.5f, 2f, 0f));
+        r.addChild("right_leg", ModelPartBuilder.create()
+                .uv(92, 32).cuboid(-1.5f, 0f, -1.5f, 3f, 22f, 3f),
+                ModelTransform.pivot(-2.5f, 2f, 0f));
+
+        return TexturedModelData.of(data, 128, 64);
+    }
+
+    @Override
+    public void setAngles(AnvilheadEntity e, float limbAngle, float limbDistance,
+                          float animationProgress, float headYaw, float headPitch) {
+        head.yaw = headYaw * ((float) Math.PI / 180f);
+        head.pitch = headPitch * ((float) Math.PI / 180f);
+
+        float swing = limbDistance * 0.5f;
+        rightArm.pitch = MathHelper.cos(limbAngle * 0.6662f + (float) Math.PI) * swing;
+        leftArm.pitch = MathHelper.cos(limbAngle * 0.6662f) * swing;
+        rightLeg.pitch = MathHelper.cos(limbAngle * 0.6662f) * 1.2f * limbDistance;
+        leftLeg.pitch = MathHelper.cos(limbAngle * 0.6662f + (float) Math.PI) * 1.2f * limbDistance;
+
+        // slow, unsettling idle sway of the arms
+        float sway = MathHelper.cos(animationProgress * 0.067f) * 0.03f;
+        leftArm.roll = -0.05f - sway;
+        rightArm.roll = 0.05f + sway;
+
+        // ROAR pose: head thrown back and shaking, arms flung wide
+        if (e.isRoaring()) {
+            float t = animationProgress;
+            head.pitch = -0.6f + MathHelper.sin(t * 2.9f) * 0.05f;
+            head.yaw += MathHelper.sin(t * 3.7f) * 0.06f;
+            leftArm.pitch = -0.3f;
+            rightArm.pitch = -0.3f;
+            leftArm.roll = -1.15f - MathHelper.sin(t * 3.1f) * 0.05f;
+            rightArm.roll = 1.15f + MathHelper.sin(t * 3.1f) * 0.05f;
+        }
+    }
+
+    @Override
+    public void render(MatrixStack matrices, VertexConsumer vertices, int light, int overlay, int color) {
+        root.render(matrices, vertices, light, overlay, color);
+    }
+}
+
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.AnvilheadMod;
+import com.example.anvilhead.entity.AnvilheadEntity;
+import net.minecraft.client.render.entity.EntityRendererFactory;
+import net.minecraft.client.render.entity.MobEntityRenderer;
+import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.util.Identifier;
+
+public class AnvilheadRenderer extends MobEntityRenderer<AnvilheadEntity, AnvilheadModel> {
+    private static final Identifier TEXTURE = Identifier.of(AnvilheadMod.MOD_ID, "textures/entity/anvilhead.png");
+
+    public AnvilheadRenderer(EntityRendererFactory.Context ctx) {
+        super(ctx, new AnvilheadModel(ctx.getPart(AnvilheadClient.MODEL_LAYER)), 0.35f);
+        this.addFeature(new AnvilheadEyesFeature(this));
+    }
+
+    @Override
+    public Identifier getTexture(AnvilheadEntity entity) { return TEXTURE; }
+
+    @Override
+    protected void scale(AnvilheadEntity entity, MatrixStack matrices, float amount) {
+        float pulse = entity.isRoaring() ? 1.0f + 0.035f * net.minecraft.util.math.MathHelper.sin((entity.age + amount) * 2.2f) : 1.0f;
+        float s = 1.16f * pulse; // 55px model -> ~4 blocks, matching the hitbox
+        matrices.scale(s, s, s);
+    }
+}
+
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.ChaseSequence;
+import com.example.anvilhead.net.ChasePhasePayload;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.entity.Entity;
+import net.minecraft.util.Util;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+
+/**
+ * Client side of the chase sequence.
+ *  CUTSCENE: look input and movement are locked, the camera is dragged onto the monster's face and zooms in,
+ *            shaking during the roar.
+ *  CHASE:    controls are returned, the chase theme plays until the monster is gone.
+ */
+public final class ChaseClient {
+    private static boolean cutscene;
+    private static boolean chasing;
+    private static int ticks;
+    private static int entityId = -1;
+    private static float zoom, prevZoom;
+    private static float glitch, prevGlitch;   // 0..1 intensity of the chase screen effects
+    private static float close;                // 0..1, how near the monster is
+    private static ChaseMusicInstance music;
+
+    private ChaseClient() {}
+
+    public static void init() {
+        ClientPlayNetworking.registerGlobalReceiver(ChasePhasePayload.ID, (payload, context) -> {
+            if (payload.phase() == ChasePhasePayload.CUTSCENE) startCutscene(payload.entityId());
+            else startChase(payload.entityId());
+        });
+        ClientTickEvents.END_CLIENT_TICK.register(ChaseClient::tick);
+        HudRenderCallback.EVENT.register(ChaseOverlay::render);
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> reset());
+    }
+
+    /** Used by the input / mouse mixins. */
+    public static boolean isInputLocked() { return cutscene; }
+
+    // ---- state changes ----
+
+    private static void startCutscene(int id) {
+        endChase();
+        cutscene = true;
+        ticks = 0;
+        entityId = id;
+        MinecraftClient.getInstance().getMusicTracker().stop(); // silence vanilla music
+    }
+
+    private static void startChase(int id) {
+        cutscene = false;
+        chasing = true;
+        entityId = id;
+        if (music != null) music.fadeOut();
+        music = new ChaseMusicInstance();
+        MinecraftClient.getInstance().getSoundManager().play(music);
+    }
+
+    private static void endChase() {
+        chasing = false;
+        if (music != null) { music.fadeOut(); music = null; }
+    }
+
+    private static void reset() {
+        cutscene = false;
+        zoom = prevZoom = 0f;
+        glitch = prevGlitch = 0f;
+        close = 0f;
+        endChase();
+    }
+
+    // ---- per tick ----
+
+    private static void tick(MinecraftClient mc) {
+        prevZoom = zoom;
+        zoom = MathHelper.clamp(zoom + (cutscene ? 0.05f : -0.12f), 0f, 1f);
+        prevGlitch = glitch;
+        glitch = MathHelper.clamp(glitch + (chasing ? 0.1f : -0.08f), 0f, 1f);
+
+        if (mc.player == null || mc.world == null) { if (cutscene || chasing) reset(); return; }
+        if (!cutscene && !chasing) return;
+
+        Entity e = mc.world.getEntityById(entityId);
+        boolean gone = e == null || !e.isAlive();
+
+        if (cutscene) {
+            ticks++;
+            if ((gone && ticks > 10) || ticks > ChaseSequence.CUTSCENE_LENGTH + 40) { cutscene = false; return; }
+            if (e != null) lockCamera(mc.player, e);
+            mc.player.setSprinting(false);
+            if (ticks % 20 == 0) mc.getMusicTracker().stop();
+        } else if (chasing) {
+            if (gone) { endChase(); return; }   // it vanished (struck you, gave up, or you escaped): fade the theme out
+            if (mc.player.age % 20 == 0) mc.getMusicTracker().stop();
+            double d = mc.player.getEyePos().distanceTo(e.getEyePos());
+            close = MathHelper.lerp(0.2f, close, (float) MathHelper.clamp(1.0 - (d - 5.0) / 35.0, 0.0, 1.0));
+        }
+    }
+
+    private static void lockCamera(ClientPlayerEntity p, Entity monster) {
+        Vec3d d = monster.getEyePos().subtract(p.getEyePos());
+        double h = Math.sqrt(d.x * d.x + d.z * d.z);
+        float targetYaw = (float) (MathHelper.atan2(d.z, d.x) * 180.0 / Math.PI) - 90f;
+        float targetPitch = (float) -(MathHelper.atan2(d.y, h) * 180.0 / Math.PI);
+
+        float yaw = MathHelper.lerpAngleDegrees(0.35f, p.getYaw(), targetYaw);
+        float pitch = MathHelper.lerp(0.35f, p.getPitch(), targetPitch);
+
+        // camera shake while it roars
+        if (ticks > ChaseSequence.ROAR_START && ticks < ChaseSequence.CUTSCENE_LENGTH - 8) {
+            yaw += (Math.random() - 0.5) * 1.6;
+            pitch += (Math.random() - 0.5) * 1.6;
+        }
+        p.setYaw(yaw);
+        p.setPitch(pitch);
+    }
+
+    // ---- chase screen effects ----
+
+    public static float getGlitch(float tickDelta) { return MathHelper.lerp(tickDelta, prevGlitch, glitch); }
+    public static float getCloseness() { return close; }
+
+    /** Camera shake as {yaw, pitch} offsets in degrees (visual only: your aim is not affected), or null when off. */
+    public static float[] shakeOffsets(float tickDelta) {
+        float g = getGlitch(tickDelta);
+        if (g <= 0.01f) return null;
+        float a = g * (0.35f + 0.65f * close);
+        double t = Util.getMeasuringTimeMs() / 1000.0;
+        long step = (long) (t * 14);   // hard jolts ~14 times a second on top of a smooth rumble
+        float yaw = (float) (Math.sin(t * 37.0) * 0.6 + Math.sin(t * 61.3 + 2.0) * 0.4) + 1.2f * hash(step, 1);
+        float pitch = (float) (Math.sin(t * 43.0 + 1.0) * 0.6 + Math.sin(t * 71.7) * 0.4) + 1.2f * hash(step, 2);
+        return new float[]{yaw * a, pitch * a};
+    }
+
+    private static float hash(long n, int seed) {
+        long x = n * 0x9E3779B97F4A7C15L + seed * 0xBF58476D1CE4E5B9L;
+        x ^= x >>> 29; x *= 0x94D049BB133111EBL; x ^= x >>> 32;
+        return ((x & 0xFFFF) / 32767.5f) - 1f;
+    }
+
+    // ---- FOV zoom (called from GameRendererMixin) ----
+
+    public static double applyZoom(MinecraftClient mc, double fov, float tickDelta) {
+        float z = MathHelper.lerp(tickDelta, prevZoom, zoom);
+        if (z <= 0.001f || mc.world == null || mc.player == null) return fov;
+        Entity e = mc.world.getEntityById(entityId);
+        if (e == null) return fov;
+
+        // frame roughly 3 blocks of height at the monster's distance: its head fills the screen
+        double dist = Math.max(2.0, mc.player.getEyePos().distanceTo(e.getEyePos()));
+        double target = MathHelper.clamp(Math.toDegrees(2 * Math.atan(1.5 / dist)) / fov, 0.12, 1.0);
+        double s = z * z * (3 - 2 * z);
+        return fov * MathHelper.lerp(s, 1.0, target);
+    }
+}
+
+package com.example.anvilhead.client;
+
+import com.example.anvilhead.AnvilheadMod;
+import net.minecraft.client.sound.MovingSoundInstance;
+import net.minecraft.client.sound.SoundInstance;
+import net.minecraft.sound.SoundCategory;
+
+/** The chase theme: non-positional (plays in your head), looped, fades in fast and fades out when the chase ends. */
+public class ChaseMusicInstance extends MovingSoundInstance {
+    private boolean fadingOut;
+
+    public ChaseMusicInstance() {
+        super(AnvilheadMod.CHASE_THEME, SoundCategory.MUSIC, SoundInstance.createRandom());
+        this.repeat = true;
+        this.repeatDelay = 0;
+        this.relative = true;
+        this.attenuationType = SoundInstance.AttenuationType.NONE;
+        this.volume = 0.01f;
+        this.x = 0; this.y = 0; this.z = 0;
+    }
+
+    public void fadeOut() { this.fadingOut = true; }
+
+    @Override
+    public void tick() {
+        if (fadingOut) {
+            volume -= 0.04f;                 // ~1 s fade
+            if (volume <= 0f) { volume = 0f; setDone(); }
+        } else if (volume < 1f) {
+            volume = Math.min(1f, volume + 0.1f);
+        }
+    }
+
+    @Override
+    public boolean canPlay() { return true; }
+}
+
+package com.example.anvilhead.client;
+
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderTickCounter;
+import net.minecraft.util.Util;
+
+import java.util.Random;
+
+/**
+ * Chase screen effect: an opaque, jagged black border that eats into your vision, with hard black-and-white
+ * glitch blocks and scanline tears along it. Re-randomised ~14 times a second, with occasional bursts.
+ * Gets thicker and angrier the closer the monster is. Everything is fully opaque, no soft fades.
+ */
+public final class ChaseOverlay {
+    private static final int BLACK = 0xFF000000;
+    private static final int WHITE = 0xFFFFFFFF;
+    private static final int GRAY = 0xFF8C8C8C;
+
+    private ChaseOverlay() {}
+
+    public static void render(DrawContext ctx, RenderTickCounter tickCounter) {
+        float g = ChaseClient.getGlitch(tickCounter.getTickDelta(false));
+        if (g <= 0.01f) return;
+
+        int w = ctx.getScaledWindowWidth();
+        int h = ctx.getScaledWindowHeight();
+        float c = ChaseClient.getCloseness();
+        float k = g * (0.55f + 0.45f * c);
+
+        Random r = new Random((Util.getMeasuringTimeMs() / 70) * 7919L + 13L);
+        float band = Math.min(w, h) * (0.05f + 0.10f * c) * g;     // base border thickness in px
+        boolean burst = r.nextFloat() < 0.07f;                        // occasional violent frame
+        if (burst) band *= 1.8f;
+
+        // 1) jagged black border
+        for (int x = 0; x < w; ) {
+            int sw = 4 + r.nextInt(36);
+            int top = (int) (band * (0.2f + r.nextFloat() * 1.6f));
+            int bot = (int) (band * (0.2f + r.nextFloat() * 1.6f));
+            ctx.fill(x, 0, Math.min(w, x + sw), top, BLACK);
+            ctx.fill(x, h - bot, Math.min(w, x + sw), h, BLACK);
+            x += sw;
+        }
+        for (int y = 0; y < h; ) {
+            int sh = 4 + r.nextInt(36);
+            int left = (int) (band * (0.2f + r.nextFloat() * 1.6f));
+            int right = (int) (band * (0.2f + r.nextFloat() * 1.6f));
+            ctx.fill(0, y, left, Math.min(h, y + sh), BLACK);
+            ctx.fill(w - right, y, w, Math.min(h, y + sh), BLACK);
+            y += sh;
+        }
+
+        // 2) black / white / gray glitch blocks clustered on the border
+        int n = (int) (12 + 60 * k) * (burst ? 2 : 1);
+        for (int i = 0; i < n; i++) {
+            int edge = r.nextInt(4);
+            int len = 6 + r.nextInt(70);
+            int th = 2 + r.nextInt(14);
+            float depth = r.nextFloat() * band * 1.8f;
+            float p = r.nextFloat();
+            int col = p < 0.5f ? WHITE : (p < 0.9f ? BLACK : GRAY);
+            switch (edge) {
+                case 0 -> { int x = r.nextInt(w); int y = (int) depth;         ctx.fill(x, y, x + len, y + th, col); }
+                case 1 -> { int x = r.nextInt(w); int y = h - (int) depth - th; ctx.fill(x, y, x + len, y + th, col); }
+                case 2 -> { int y = r.nextInt(h); int x = (int) depth;         ctx.fill(x, y, x + th, y + len, col); }
+                default -> { int y = r.nextInt(h); int x = w - (int) depth - th; ctx.fill(x, y, x + th, y + len, col); }
+            }
+        }
+
+        // 3) scanline tears: thin displaced white slivers across the side borders
+        if (r.nextFloat() < 0.1f + 0.3f * k) {
+            int tears = 1 + r.nextInt(3);
+            for (int i = 0; i < tears; i++) {
+                int ty = r.nextInt(h);
+                int th = 1 + r.nextInt(5);
+                int tw = (int) (band * (1.0f + r.nextFloat() * 3.0f));
+                ctx.fill(0, ty, tw, ty + th, WHITE);
+                ctx.fill(tw, ty, tw + 6 + r.nextInt(14), ty + th, BLACK);
+                ctx.fill(w - tw, ty + 2, w, ty + th + 2, WHITE);
+            }
+        }
+    }
+}
+package com.example.anvilhead.entity;
+
+import com.example.anvilhead.AnvilheadMod;
+import net.minecraft.entity.Entity;
+import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.Heightmap;
+import net.minecraft.world.World;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+/**
+ * Custom spawning so it is truly rare: at most ONE in the whole server at any time.
+ *  - Night, surface forest: it "peeks". It spawns behind the SHORTEST tree trunk that is at least 5 blocks tall
+ *    (a 4-block-tall monster hides fully behind a 5+ tall trunk, with its wide head poking out at the sides).
+ *  - Dark cave (light level 3 or less): spawns in the darkest hidden spot it can find.
+ */
+public class AnvilheadSpawner {
+    private static final int CHECK_INTERVAL = 200;   // ticks (10 s)
+    private static final int SPAWN_ODDS = 45;        // 1-in-45 per check -> ~7.5 min average while conditions hold
+    private static final int MIN_TRUNK_HEIGHT = 5;   // trunks must be at least this tall (blocks)
+
+    public static void tick(ServerWorld world) {
+        if (world.getTime() % CHECK_INTERVAL != 0) return;
+        if (!world.getRegistryKey().equals(World.OVERWORLD)) return;
+        if (world.getDifficulty() == Difficulty.PEACEFUL) return;
+
+        for (ServerPlayerEntity p : world.getPlayers()) {
+            if (p.isSpectator()) continue;
+            if (world.random.nextInt(SPAWN_ODDS) != 0) continue;
+            if (anyExists(world.getServer(), null)) continue; // only ONE Anvilhead in the whole server at a time
+
+            boolean underground = isUnderground(world, p);
+            if (!underground && !isForestAtNight(world, p)) continue;
+            trySpawn(world, p, underground);
+        }
+    }
+
+    /** Is there already a living Anvilhead (other than {@code except}) in any loaded dimension? */
+    public static boolean anyExists(MinecraftServer server, Entity except) {
+        for (ServerWorld w : server.getWorlds()) {
+            for (Entity e : w.iterateEntities()) {
+                if (e != except && e instanceof AnvilheadEntity && e.isAlive()) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isUnderground(ServerWorld world, ServerPlayerEntity p) {
+        return p.getY() < world.getSeaLevel() - 5 && !world.isSkyVisible(p.getBlockPos());
+    }
+
+    private static boolean isForestAtNight(ServerWorld world, ServerPlayerEntity p) {
+        if (!world.isNight()) return false; // strictly night: storms during the day don't count
+        int logs = 0;
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int i = 0; i < 80; i++) {
+            m.set(p.getBlockX() + world.random.nextBetween(-12, 12),
+                  p.getBlockY() + world.random.nextBetween(-2, 8),
+                  p.getBlockZ() + world.random.nextBetween(-12, 12));
+            if (world.getBlockState(m).isIn(BlockTags.LOGS)) logs++;
+        }
+        return logs >= 5;
+    }
+
+    private static void trySpawn(ServerWorld world, ServerPlayerEntity p, boolean underground) {
+        if (!underground) { spawnPeeking(world, p); return; }
+        spawnInCave(world, p);
+    }
+
+    // =====================================================================
+    //  NIGHT / SURFACE: peek from behind the shortest 5+ block tree
+    // =====================================================================
+
+    private record Trunk(BlockPos base, int height, double tie) {}
+
+    private static void spawnPeeking(ServerWorld world, ServerPlayerEntity p) {
+        List<Trunk> trunks = new ArrayList<>();
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        int px = p.getBlockX(), pz = p.getBlockZ();
+
+        // scan the ring 18-40 blocks around the player for tree trunks
+        for (int dx = -40; dx <= 40; dx++) {
+            for (int dz = -40; dz <= 40; dz++) {
+                int d2 = dx * dx + dz * dz;
+                if (d2 < 18 * 18 || d2 > 40 * 40) continue;
+                int x = px + dx, z = pz + dz;
+                if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) continue;
+
+                int top = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+                m.set(x, top - 1, z);
+                if (!world.getBlockState(m).isIn(BlockTags.LOGS)) continue;
+
+                int h = 0;
+                while (world.getBlockState(m).isIn(BlockTags.LOGS)) { h++; m.move(Direction.DOWN); }
+                if (h < MIN_TRUNK_HEIGHT) continue;
+                if (!world.getBlockState(m).isSideSolidFullSquare(world, m, Direction.UP)) continue; // must grow from the ground
+                trunks.add(new Trunk(m.up().toImmutable(), h, world.random.nextDouble()));
+            }
+        }
+
+        // shortest trunk first (random among equals)
+        trunks.sort(Comparator.comparingInt(Trunk::height).thenComparingDouble(Trunk::tie));
+        int tries = 0;
+        for (Trunk t : trunks) {
+            if (tries++ >= 12) break;
+            if (placeBehind(world, p, t.base())) return;
+        }
+    }
+
+    /** Puts it just behind the trunk (from the player's point of view), slightly off-centre so its head peeks out. */
+    private static boolean placeBehind(ServerWorld world, ServerPlayerEntity p, BlockPos base) {
+        Vec3d trunk = Vec3d.ofBottomCenter(base);
+        Vec3d dir = new Vec3d(trunk.x - p.getX(), 0, trunk.z - p.getZ()).normalize();
+        Vec3d perp = new Vec3d(-dir.z, 0, dir.x);
+        float yaw = (float) (MathHelper.atan2(-dir.z, -dir.x) * 180.0 / Math.PI) - 90f; // faces the player
+
+        for (double back : new double[]{1.3, 1.6, 2.0}) {
+            for (double side : new double[]{0.45, -0.45, 0.0}) {
+                Vec3d at = trunk.add(dir.multiply(back)).add(perp.multiply(side));
+                BlockPos bp = AnvilheadEntity.findStandable(world, BlockPos.ofFloored(at.x, base.getY(), at.z));
+                if (bp == null || Math.abs(bp.getY() - base.getY()) > 1) continue;
+                if (world.getLightLevel(bp) > 7) continue;
+                Vec3d feet = new Vec3d(at.x, bp.getY(), at.z);
+                if (!AnvilheadEntity.isHiddenFrom(world, p, feet)) continue;
+                if (spawn(world, feet, yaw, true)) return true;
+            }
+        }
+        return false;
+    }
+
+    // =====================================================================
+    //  CAVES: darkest hidden spot
+    // =====================================================================
+
+    private static void spawnInCave(ServerWorld world, ServerPlayerEntity p) {
+        BlockPos best = null;
+        double bestScore = Double.POSITIVE_INFINITY; // lower = darker / better
+
+        for (int i = 0; i < 80; i++) {
+            double ang = world.random.nextDouble() * Math.PI * 2;
+            double r = 20 + world.random.nextDouble() * 24;
+            int x = MathHelper.floor(p.getX() + Math.cos(ang) * r);
+            int z = MathHelper.floor(p.getZ() + Math.sin(ang) * r);
+            if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) continue;
+
+            int y = p.getBlockY() + world.random.nextBetween(-8, 8);   // caves twist up and down
+            BlockPos pos = AnvilheadEntity.findStandable(world, new BlockPos(x, y, z));
+            if (pos == null) continue;
+            if (world.getLightLevel(pos) > 3) continue;
+            if (!AnvilheadEntity.isHiddenFrom(world, p, Vec3d.ofBottomCenter(pos))) continue;
+
+            double score = darknessScore(world, pos);
+            // tiny tie-breaker: prefer ~28 blocks away so it doesn't start right on top of the player
+            score += Math.abs(Math.sqrt(pos.getSquaredDistance(p.getBlockPos())) - 28) * 0.02;
+            if (score < bestScore) { bestScore = score; best = pos; }
+        }
+
+        if (best != null) spawn(world, Vec3d.ofBottomCenter(best), world.random.nextFloat() * 360f, false);
+    }
+
+    /** Lower is darker. Looks at the spot itself plus the air around it, so a pitch-black pocket beats a dim edge. */
+    private static double darknessScore(ServerWorld world, BlockPos pos) {
+        double score = world.getLightLevel(pos) * 3.0 + world.getLightLevel(pos.up(3)) * 2.0;
+        int[][] around = {{3, 0}, {-3, 0}, {0, 3}, {0, -3}};
+        for (int[] o : around) {
+            score += world.getLightLevel(pos.add(o[0], 1, o[1]));
+        }
+        return score;
+    }
+
+
+    // =====================================================================
+    //  EYES EVENT: spawn ~50 blocks away, any time of day, and chase at once
+    // =====================================================================
+
+    /**
+     * Removes any existing Anvilhead (only one may exist), then spawns a new one about 50 blocks from the player
+     * and starts the chase immediately (no cutscene). Works day or night, surface or underground.
+     * Returns false if no valid spot was found (the caller retries for a few seconds).
+     */
+    public static boolean spawnChaser(ServerWorld world, ServerPlayerEntity p) {
+        List<AnvilheadEntity> existing = new ArrayList<>();
+        for (ServerWorld w : world.getServer().getWorlds()) {
+            for (Entity e : w.iterateEntities()) {
+                if (e instanceof AnvilheadEntity a && a.isAlive()) existing.add(a);
+            }
+        }
+        for (AnvilheadEntity a : existing) a.vanish();
+
+        // try exactly ~50 blocks first, then progressively closer if the terrain doesn't allow it
+        double[][] bands = {{48, 52}, {40, 50}, {25, 50}, {10, 50}};
+        boolean sky = world.isSkyVisible(p.getBlockPos());
+        for (double[] band : bands) {
+            for (int i = 0; i < 80; i++) {
+                double ang = world.random.nextDouble() * Math.PI * 2;
+                double r = band[0] + world.random.nextDouble() * (band[1] - band[0]);
+                int x = MathHelper.floor(p.getX() + Math.cos(ang) * r);
+                int z = MathHelper.floor(p.getZ() + Math.sin(ang) * r);
+                if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) continue;
+
+                int y = sky
+                        ? world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z)
+                        : p.getBlockY() + world.random.nextBetween(-10, 10);
+                BlockPos pos = AnvilheadEntity.findStandable(world, new BlockPos(x, y, z));
+                if (pos == null) continue;
+
+                AnvilheadEntity e = AnvilheadMod.ANVILHEAD.create(world);
+                if (e == null) return false;
+                e.refreshPositionAndAngles(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, world.random.nextFloat() * 360f, 0f);
+                if (!world.isSpaceEmpty(e)) continue;
+                world.spawnEntity(e);
+                e.forceChase(p);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean spawn(ServerWorld world, Vec3d feet, float yaw, boolean peeking) {
+        AnvilheadEntity e = AnvilheadMod.ANVILHEAD.create(world);
+        if (e == null) return false;
+        e.refreshPositionAndAngles(feet.x, feet.y, feet.z, yaw, 0f);
+        e.setPeeking(peeking);
+        if (!world.isSpaceEmpty(e)) return false;
+        world.spawnEntity(e);
+        return true;
+    }
+}
+
+package com.example.anvilhead.entity;
+
+import net.minecraft.entity.ai.goal.MeleeAttackGoal;
+
+/** Only active during the (very rare) rush. Roughly sprint speed (see AnvilheadEntity.CHASE_SPEED). */
+public class RushGoal extends MeleeAttackGoal {
+    private final AnvilheadEntity mob;
+
+    public RushGoal(AnvilheadEntity mob) {
+        super(mob, AnvilheadEntity.CHASE_SPEED, true);
+        this.mob = mob;
+    }
+
+    @Override public boolean canStart() { return mob.isRushing() && super.canStart(); }
+    @Override public boolean shouldContinue() { return mob.isRushing() && super.shouldContinue(); }
+}
+
+package com.example.anvilhead.entity;
+
+import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+
+/** Keeps ~20 blocks from the player and prefers spots that are hidden, dark, and beside a tree trunk. */
+public class StalkGoal extends Goal {
+    private final AnvilheadEntity mob;
+    private int repathCooldown;
+
+    public StalkGoal(AnvilheadEntity mob) {
+        this.mob = mob;
+        setControls(EnumSet.of(Control.MOVE, Control.LOOK));
+    }
+
+    @Override public boolean canStart() { return !mob.isRushing() && !mob.isInCutscene() && mob.findPlayer() != null; }
+    @Override public boolean shouldContinue() { return canStart(); }
+
+    @Override
+    public void tick() {
+        PlayerEntity player = mob.findPlayer();
+        if (player == null) return;
+        // Peeking from behind a tree: never moves, the entity itself keeps its face turned to the player.
+        if (mob.isPeeking()) { mob.getNavigation().stop(); return; }
+        mob.getLookControl().lookAt(player, 30.0f, 30.0f);
+
+        // Caught in the player's gaze: freeze completely.
+        if (mob.getStare() > 0) {
+            mob.getNavigation().stop();
+            return;
+        }
+
+        if (--repathCooldown > 0) return;
+        repathCooldown = 10 + mob.getRandom().nextInt(10);
+
+        World world = mob.getWorld();
+        BlockPos here = mob.getBlockPos();
+        List<BlockPos> candidates = new ArrayList<>();
+        candidates.add(here);
+        for (int i = 0; i < 16; i++) {
+            BlockPos s = here.add(mob.getRandom().nextBetween(-8, 8), 0, mob.getRandom().nextBetween(-8, 8));
+            BlockPos st = AnvilheadEntity.findStandable(world, s);
+            if (st != null) candidates.add(st);
+        }
+
+        BlockPos best = here;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        for (BlockPos c : candidates) {
+            double sc = score(world, player, c) + mob.getRandom().nextDouble();
+            if (sc > bestScore) { bestScore = sc; best = c; }
+        }
+
+        if (best.equals(here)) {
+            mob.getNavigation().stop();
+        } else {
+            mob.getNavigation().startMovingTo(best.getX() + 0.5, best.getY(), best.getZ() + 0.5, 1.1);
+        }
+    }
+
+    private double score(World world, PlayerEntity player, BlockPos pos) {
+        Vec3d feet = Vec3d.ofBottomCenter(pos);
+        double d = feet.distanceTo(player.getPos());
+        double s = 0;
+        s += AnvilheadEntity.isHiddenFrom(world, player, feet) ? 6 : -6;   // out of sight
+        if (AnvilheadEntity.nearLogs(world, pos)) s += 3;                  // behind a tree
+        int light = world.getLightLevel(pos);
+        s += light <= 3 ? 3 : (light <= 7 ? 1 : -3);                       // darkness
+        s -= Math.abs(d - 20) * 0.35;                                      // keep ~20 blocks away
+        if (d < 10) s -= 20;                                               // never let the player get close
+        s -= Math.sqrt(pos.getSquaredDistance(mob.getBlockPos())) * 0.15;  // don't wander pointlessly
+        return s;
+    }
+}
+
+package com.example.anvilhead.entity;
+
+import com.example.anvilhead.ChaseSequence;
+import com.example.anvilhead.net.ChasePhasePayload;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.block.BlockState;
+import net.minecraft.nbt.NbtCompound;
+import net.minecraft.util.math.Box;
+import java.util.Optional;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityType;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.attribute.DefaultAttributeContainer;
+import net.minecraft.entity.attribute.EntityAttributes;
+import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.entity.data.DataTracker;
+import net.minecraft.entity.data.TrackedData;
+import net.minecraft.entity.data.TrackedDataHandlerRegistry;
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.particle.ParticleTypes;
+import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvents;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
+import net.minecraft.world.World;
+
+/**
+ * The Anvilhead. It spends nearly all of its life hidden: behind tree trunks,
+ * in unlit cave corners, always out of the player's line of sight.
+ * It freezes when looked at, and leaves if stared at for too long.
+ *
+ * Very rarely, when the player is alone in the dark and not looking, it triggers a cutscene:
+ * it appears in front of the player, the camera locks onto its face, it ROARS, and then the chase begins
+ * (with the chase theme). One strike ends the chase.
+ */
+public class AnvilheadEntity extends HostileEntity {
+    // ---- tuning ----
+    private static final int MAX_LIFETIME = 20 * 60 * 6;       // leaves after 6 minutes
+    private static final int MIN_LIFE_BEFORE_RUSH = 20 * 45;   // never starts a chase in its first 45 s
+    private static final int RUSH_ODDS = 100;                  // 1-in-N roll, once per second, only when conditions are met
+    private static final int STARE_LIMIT = 90;                 // ticks of being looked at before it vanishes
+    private static final int PEEK_LIFETIME = 20 * 150;         // a peeking one leaves after 2.5 min if you never look at it
+    private static final int LOOK_TICKS = 5;                   // how long you must look at its head to trigger the chase
+    private static final int CHASE_TIMEOUT = 20 * 157;         // 2:37 - if it hasn't caught the player by then, it despawns
+    /** Chase speed multiplier on top of its 0.3 base speed. ~1.25 is about sprint speed. Raise it to make escape harder. */
+    public static final double CHASE_SPEED = 1.25;
+
+    private static final TrackedData<Boolean> ROARING =
+            DataTracker.registerData(AnvilheadEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
+
+    private boolean rushing;
+    private boolean peeking;          // night/surface mode: hides behind a tall tree and watches you
+    private boolean rushPending;
+    private int cutsceneTicks = -1;   // -1 = no cutscene running
+    private int life;
+    private int stare;
+    private int rushTicks;
+
+    public AnvilheadEntity(EntityType<? extends AnvilheadEntity> type, World world) {
+        super(type, world);
+    }
+
+    public static DefaultAttributeContainer.Builder createAttributes() {
+        return HostileEntity.createHostileAttributes()
+                .add(EntityAttributes.GENERIC_MAX_HEALTH, 60.0)
+                .add(EntityAttributes.GENERIC_MOVEMENT_SPEED, 0.3)
+                .add(EntityAttributes.GENERIC_ATTACK_DAMAGE, 8.0)
+                .add(EntityAttributes.GENERIC_FOLLOW_RANGE, 64.0);
+    }
+
+    @Override
+    protected void initDataTracker(DataTracker.Builder builder) {
+        super.initDataTracker(builder);
+        builder.add(ROARING, false);
+    }
+
+    @Override
+    protected void initGoals() {
+        this.goalSelector.add(1, new RushGoal(this));
+        this.goalSelector.add(2, new StalkGoal(this));
+    }
+
+    public boolean isRushing() { return rushing; }
+    public boolean isPeeking() { return peeking; }
+    public void setPeeking(boolean peeking) { this.peeking = peeking; }
+    public boolean isInCutscene() { return cutsceneTicks >= 0; }
+    public boolean isRoaring() { return this.dataTracker.get(ROARING); }
+    public int getStare() { return stare; }
+
+    public PlayerEntity findPlayer() {
+        return getWorld().getClosestPlayer(this, 80.0);
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (!(getWorld() instanceof ServerWorld world)) return;
+        life++;
+
+        PlayerEntity player = findPlayer();
+        if (player == null) { vanish(); return; }
+        if (!rushing && cutsceneTicks < 0 && life > MAX_LIFETIME) { vanish(); return; }
+
+        if (cutsceneTicks >= 0) { tickCutscene(world); return; }
+
+        if (rushing) {
+            rushTicks++;
+            LivingEntity t = getTarget();
+            if (rushTicks > CHASE_TIMEOUT || t == null || !t.isAlive()) vanish();
+            return;
+        }
+
+        double dist = distanceTo(player);
+
+        // quiet heartbeat when it is close
+        if (life % 40 == 0 && dist < 20) {
+            world.playSound(null, player.getX(), player.getY(), player.getZ(),
+                    SoundEvents.ENTITY_WARDEN_HEARTBEAT, SoundCategory.HOSTILE, 0.5f, 0.7f);
+        }
+
+        if (peeking) { tickPeeking(world, player); return; }
+
+        if (isWatchedBy(player)) stare++; else stare = Math.max(0, stare - 2);
+        if (stare > STARE_LIMIT) { vanish(); return; }
+
+        // the rare attack: roll once per second; if the cutscene can't be staged yet, keep retrying
+        if (life % 20 == 0 && life > MIN_LIFE_BEFORE_RUSH && stare == 0 && dist <= 26
+                && world.getLightLevel(player.getBlockPos()) <= 6
+                && player instanceof ServerPlayerEntity sp && !sp.isSpectator()) {
+            if (!rushPending && random.nextInt(RUSH_ODDS) == 0) rushPending = true;
+            if (rushPending && startCutscene(sp)) rushPending = false;
+        }
+    }
+
+    // ---------------- cutscene ----------------
+
+    private boolean startCutscene(ServerPlayerEntity sp) {
+        if (peeking ? !stepOutFromCover(sp) : !placeInView(sp)) return false;
+        cutsceneTicks = 0;
+        stare = 0;
+        setTarget(sp);
+        getNavigation().stop();
+        ServerPlayNetworking.send(sp, new ChasePhasePayload(getId(), ChasePhasePayload.CUTSCENE));
+        return true;
+    }
+
+    /** The player must be able to see its face. If it is hiding, put it in the open 12-20 blocks in front of them. */
+    private boolean placeInView(ServerPlayerEntity sp) {
+        World w = getWorld();
+        if (distanceTo(sp) <= 40 && headVisible(w, sp, getPos())) return true;
+
+        Vec3d look = sp.getRotationVec(1.0f);
+        double baseAngle = Math.atan2(look.z, look.x);
+        for (int i = 0; i < 40; i++) {
+            double ang = baseAngle + Math.toRadians(random.nextBetween(-35, 35));
+            double r = 12 + random.nextDouble() * 8;
+            BlockPos p = findStandable(w, BlockPos.ofFloored(
+                    sp.getX() + Math.cos(ang) * r, sp.getY(), sp.getZ() + Math.sin(ang) * r));
+            if (p == null) continue;
+            Vec3d feet = Vec3d.ofBottomCenter(p);
+            if (!headVisible(w, sp, feet)) continue;
+            refreshPositionAndAngles(feet.x, feet.y, feet.z, getYaw(), 0f);
+            getNavigation().stop();
+            return true;
+        }
+        return false;
+    }
+
+    // ---------------- peeking (night, surface) ----------------
+
+    /** Hidden behind a tree, face turned to you. Look straight at its head and the chase begins. */
+    private void tickPeeking(ServerWorld world, PlayerEntity player) {
+        getNavigation().stop();
+        faceTowards(player);
+        if (!world.isNight() || life > PEEK_LIFETIME) { vanish(); return; }   // dawn, or you never looked
+
+        if (!(player instanceof ServerPlayerEntity sp) || sp.isSpectator()) return;
+        if (life > 40 && isHeadLookedAt(sp)) {
+            if (++stare >= LOOK_TICKS && startCutscene(sp)) stare = 0;
+        } else {
+            stare = Math.max(0, stare - 1);
+        }
+    }
+
+    /** Is the player's crosshair on its head, with nothing (like the tree trunk) in the way? */
+    public boolean isHeadLookedAt(PlayerEntity p) {
+        Vec3d eye = p.getEyePos();
+        Vec3d end = eye.add(p.getRotationVec(1.0f).multiply(64.0));
+        Box head = new Box(getX() - 1.0, getY() + 2.9, getZ() - 1.0, getX() + 1.0, getY() + 4.0, getZ() + 1.0);
+        Optional<Vec3d> hit = head.raycast(eye, end);
+        if (hit.isEmpty()) return false;
+        double headDist = eye.distanceTo(hit.get());
+        BlockHitResult block = getWorld().raycast(new RaycastContext(eye, end,
+                RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, p));
+        return block.getType() == HitResult.Type.MISS || eye.distanceTo(block.getPos()) >= headDist - 0.05;
+    }
+
+    /** Steps out sideways from behind its tree so the player gets a clear view of the face for the cutscene. */
+    private boolean stepOutFromCover(ServerPlayerEntity sp) {
+        World w = getWorld();
+        Vec3d n = new Vec3d(sp.getX() - getX(), 0, sp.getZ() - getZ());
+        if (n.lengthSquared() < 1.0E-4) return false;
+        n = n.normalize();
+        Vec3d perp = new Vec3d(-n.z, 0, n.x);
+        for (double off : new double[]{1.4, -1.4, 2.0, -2.0, 2.6, -2.6}) {
+            Vec3d at = getPos().add(perp.multiply(off)).add(n.multiply(0.5));
+            BlockPos bp = findStandable(w, BlockPos.ofFloored(at.x, getY(), at.z));
+            if (bp == null) continue;
+            Vec3d feet = new Vec3d(at.x, bp.getY(), at.z);
+            if (!headVisible(w, sp, feet)) continue;
+            refreshPositionAndAngles(feet.x, feet.y, feet.z, getYaw(), 0f);
+            getNavigation().stop();
+            return true;
+        }
+        return placeInView(sp);
+    }
+
+    @Override
+    public void writeCustomDataToNbt(NbtCompound nbt) {
+        super.writeCustomDataToNbt(nbt);
+        nbt.putBoolean("Peeking", peeking);
+    }
+
+    @Override
+    public void readCustomDataFromNbt(NbtCompound nbt) {
+        super.readCustomDataFromNbt(nbt);
+        peeking = nbt.getBoolean("Peeking");
+    }
+
+    private void tickCutscene(ServerWorld world) {
+        if (!(getTarget() instanceof ServerPlayerEntity sp) || !sp.isAlive() || sp.isSpectator()) {
+            vanish();
+            return;
+        }
+        getNavigation().stop();
+        setVelocity(0, getVelocity().y, 0);
+        faceTowards(sp);
+
+        int c = cutsceneTicks++;
+        if (c == 0 || c == 14) {
+            world.playSound(null, sp.getX(), sp.getY(), sp.getZ(),
+                    SoundEvents.ENTITY_WARDEN_HEARTBEAT, SoundCategory.HOSTILE, 2.0f, 0.6f);
+        }
+        if (c == ChaseSequence.ROAR_START) {
+            this.dataTracker.set(ROARING, true);
+            double x = getX(), y = getEyeY(), z = getZ();
+            world.playSound(null, x, y, z, SoundEvents.ENTITY_WARDEN_ROAR, SoundCategory.HOSTILE, 4.0f, 0.6f);
+            world.playSound(null, x, y, z, SoundEvents.ENTITY_ENDER_DRAGON_GROWL, SoundCategory.HOSTILE, 4.0f, 0.5f);
+            world.playSound(null, x, y, z, SoundEvents.ENTITY_RAVAGER_ROAR, SoundCategory.HOSTILE, 4.0f, 0.45f);
+        }
+        if (c >= ChaseSequence.CUTSCENE_LENGTH) {
+            this.dataTracker.set(ROARING, false);
+            cutsceneTicks = -1;
+            beginChase(sp);
+        }
+    }
+
+    /**
+     * Skips hiding and the cutscene: it is already out in the open (e.g. 50 blocks away) and the chase
+     * starts right now, with the chase theme and a roar that carries across the distance.
+     */
+    public void forceChase(ServerPlayerEntity sp) {
+        peeking = false;
+        rushPending = false;
+        cutsceneTicks = -1;
+        stare = 0;
+        life = MIN_LIFE_BEFORE_RUSH;
+        getNavigation().stop();
+        if (getWorld() instanceof ServerWorld world) {
+            world.playSound(null, getX(), getEyeY(), getZ(), SoundEvents.ENTITY_WARDEN_ROAR, SoundCategory.HOSTILE, 6.0f, 0.6f);
+            world.playSound(null, getX(), getEyeY(), getZ(), SoundEvents.ENTITY_RAVAGER_ROAR, SoundCategory.HOSTILE, 6.0f, 0.45f);
+        }
+        beginChase(sp);
+    }
+
+    private void beginChase(ServerPlayerEntity sp) {
+        rushing = true;
+        rushTicks = 0;
+        setTarget(sp);
+        ServerPlayNetworking.send(sp, new ChasePhasePayload(getId(), ChasePhasePayload.CHASE));
+    }
+
+    private void faceTowards(LivingEntity t) {
+        Vec3d d = t.getEyePos().subtract(getEyePos());
+        double h = Math.sqrt(d.x * d.x + d.z * d.z);
+        float yaw = (float) (MathHelper.atan2(d.z, d.x) * 180.0 / Math.PI) - 90f;
+        float pitch = (float) -(MathHelper.atan2(d.y, h) * 180.0 / Math.PI);
+        setYaw(yaw);
+        setBodyYaw(yaw);
+        setHeadYaw(yaw);
+        setPitch(pitch);
+    }
+
+    @Override
+    public boolean tryAttack(Entity target) {
+        boolean hit = super.tryAttack(target);
+        if (hit && target instanceof LivingEntity living) {
+            living.addStatusEffect(new StatusEffectInstance(StatusEffects.DARKNESS, 160, 0), this);
+            living.addStatusEffect(new StatusEffectInstance(StatusEffects.SLOWNESS, 60, 1), this);
+            vanish(); // one strike, then gone (the client fades the chase theme out when it disappears)
+        }
+        return hit;
+    }
+
+    /** While stalking or in the cutscene it isn't really "there": hits just make it leave (or do nothing mid-cutscene). */
+    @Override
+    public boolean damage(DamageSource source, float amount) {
+        if (cutsceneTicks >= 0 && source.getAttacker() != null) return false;
+        if (!rushing && source.getAttacker() != null) {
+            if (!getWorld().isClient) vanish();
+            return false;
+        }
+        return super.damage(source, amount);
+    }
+
+    public void vanish() {
+        if (getWorld() instanceof ServerWorld w) {
+            w.spawnParticles(ParticleTypes.LARGE_SMOKE, getX(), getY() + 1.5, getZ(), 30, 0.3, 1.0, 0.3, 0.02);
+        }
+        discard();
+    }
+
+    @Override
+    protected void playStepSound(BlockPos pos, BlockState state) { /* silent footsteps */ }
+
+    @Override
+    public boolean canImmediatelyDespawn(double distanceSquared) { return false; }
+
+    // ---------------- helpers ----------------
+
+    /** Is the player's crosshair roughly on this entity, with a clear line of sight? */
+    public boolean isWatchedBy(PlayerEntity p) {
+        Vec3d look = p.getRotationVec(1.0f).normalize();
+        Vec3d to = new Vec3d(getX() - p.getX(), getEyeY() - p.getEyeY(), getZ() - p.getZ());
+        double dist = to.length();
+        if (dist < 0.001) return true;
+        to = to.normalize();
+        return look.dotProduct(to) > 1.0 - 0.2 / dist && p.canSee(this);
+    }
+
+    /** True if both its head and torso would be blocked from the player's eyes at {@code feet}. */
+    public static boolean isHiddenFrom(World world, PlayerEntity player, Vec3d feet) {
+        return blocked(world, player, feet.add(0, 3.3, 0)) && blocked(world, player, feet.add(0, 1.6, 0));
+    }
+
+    /** True if the player has a clear line of sight to the face at {@code feet}. */
+    public static boolean headVisible(World world, PlayerEntity player, Vec3d feet) {
+        return !blocked(world, player, feet.add(0, 3.4, 0));
+    }
+
+    private static boolean blocked(World world, PlayerEntity player, Vec3d target) {
+        BlockHitResult hit = world.raycast(new RaycastContext(player.getEyePos(), target,
+                RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, player));
+        return hit.getType() != HitResult.Type.MISS;
+    }
+
+    /** Finds floor + 4 blocks of headroom (it is 4 blocks tall) near {@code around}. Never stands on leaves. */
+    public static BlockPos findStandable(World world, BlockPos around) {
+        for (int dy = 3; dy >= -5; dy--) {
+            BlockPos pos = around.up(dy);
+            if (!world.getChunkManager().isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) return null;
+            BlockPos below = pos.down();
+            BlockState floor = world.getBlockState(below);
+            if (floor.isIn(BlockTags.LEAVES)) continue;
+            if (floor.isSideSolidFullSquare(world, below, Direction.UP)
+                    && clear(world, pos) && clear(world, pos.up()) && clear(world, pos.up(2)) && clear(world, pos.up(3))) {
+                return pos;
+            }
+        }
+        return null;
+    }
+
+    private static boolean clear(World w, BlockPos p) {
+        BlockState s = w.getBlockState(p);
+        return s.getCollisionShape(w, p).isEmpty() && s.getFluidState().isEmpty();
+    }
+
+    /** Is there a tree trunk right next to this spot? (so it can lurk behind it) */
+    public static boolean nearLogs(World world, BlockPos pos) {
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                for (int dy = 0; dy <= 2; dy++)
+                    if (world.getBlockState(pos.add(dx, dy, dz)).isIn(BlockTags.LOGS)) return true;
+            }
+        return false;
+    }
+}
+package com.example.anvilhead.mixin;
+
+import com.example.anvilhead.client.ChaseClient;
+import com.example.anvilhead.client.EyeEventClient;
+import net.minecraft.client.render.Camera;
+import net.minecraft.entity.Entity;
+import net.minecraft.world.BlockView;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/** Shakes the rendered camera during the chase. Visual only: it doesn't change where the player is actually aiming. */
+@Mixin(Camera.class)
+public abstract class CameraMixin {
+    @Shadow private float yaw;
+    @Shadow private float pitch;
+    @Shadow protected abstract void setRotation(float yaw, float pitch);
+
+    @Inject(method = "update", at = @At("TAIL"))
+    private void anvilhead$shake(BlockView area, Entity focusedEntity, boolean thirdPerson,
+                                 boolean inverseView, float tickDelta, CallbackInfo ci) {
+        float[] a = ChaseClient.shakeOffsets(tickDelta);
+        float[] b = EyeEventClient.shakeOffsets(tickDelta);
+        if (a == null && b == null) return;
+        float dy = (a != null ? a[0] : 0f) + (b != null ? b[0] : 0f);
+        float dp = (a != null ? a[1] : 0f) + (b != null ? b[1] : 0f);
+        setRotation(this.yaw + dy, this.pitch + dp);
+    }
+}
+
+package com.example.anvilhead.mixin;
+
+import com.example.anvilhead.client.ChaseClient;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.Entity;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/** During the cutscene the mouse can't move the camera. */
+@Mixin(Entity.class)
+public abstract class EntityLookMixin {
+    @Inject(method = "changeLookDirection", at = @At("HEAD"), cancellable = true)
+    private void anvilhead$lockLook(double cursorDeltaX, double cursorDeltaY, CallbackInfo ci) {
+        if (ChaseClient.isInputLocked() && (Object) this == MinecraftClient.getInstance().player) {
+            ci.cancel();
+        }
+    }
+}
+
+package com.example.anvilhead.mixin;
+
+import com.example.anvilhead.client.ChaseClient;
+import com.example.anvilhead.client.EyeEventClient;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.GameRenderer;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+/** Zooms the camera in on the monster's face during the cutscene, and kicks the FOV on the eyes-event shockwave. */
+@Mixin(GameRenderer.class)
+public abstract class GameRendererMixin {
+    @Inject(method = "getFov", at = @At("RETURN"), cancellable = true)
+    private void anvilhead$zoom(Camera camera, float tickDelta, boolean changingFov, CallbackInfoReturnable<Double> cir) {
+        if (!changingFov) return;
+        double fov = ChaseClient.applyZoom(MinecraftClient.getInstance(), cir.getReturnValue(), tickDelta);
+        cir.setReturnValue(EyeEventClient.applyFov(fov, tickDelta));
+    }
+}
+
+package com.example.anvilhead.mixin;
+
+import com.example.anvilhead.client.ChaseClient;
+import net.minecraft.client.input.Input;
+import net.minecraft.client.input.KeyboardInput;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/** During the cutscene the player can't walk, jump or sneak. */
+@Mixin(KeyboardInput.class)
+public abstract class KeyboardInputMixin extends Input {
+    @Inject(method = "tick", at = @At("TAIL"))
+    private void anvilhead$lockMovement(boolean slowDown, float slowDownFactor, CallbackInfo ci) {
+        if (ChaseClient.isInputLocked()) {
+            this.movementForward = 0f;
+            this.movementSideways = 0f;
+            this.pressingForward = false;
+            this.pressingBack = false;
+            this.pressingLeft = false;
+            this.pressingRight = false;
+            this.jumping = false;
+            this.sneaking = false;
+        }
+    }
+}
+
+package com.example.anvilhead.mixin;
+
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.render.LightmapTextureManager;
+import net.minecraft.client.texture.NativeImage;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.world.World;
+import org.spongepowered.asm.mixin.Final;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/**
+ * Makes the Overworld truly pitch black wherever there is no real light source.
+ *
+ * The lightmap is a 16x16 texture: x = block light (torches etc.), y = sky light.
+ * Right before vanilla uploads it, we:
+ *   1. subtract the darkest texel (block 0 / sky 0), which removes the Brightness-slider lift ("moody/bright"),
+ *   2. crush everything dimmer than DARK_FLOOR to pure black, fading smoothly up to FULL_BRIGHT.
+ *
+ * Result: a cave with no torches is 0,0,0. Torches / lava / glowstone still work, a dim edge of torch light
+ * fades out much sooner than in vanilla, and Night Vision still works (it lifts the values above the crush range).
+ * Anything lit only by this black lightmap (terrain, mobs, your own hand) is invisible. Fullbright things,
+ * like the Anvilhead's eyes, are not affected.
+ */
+@Mixin(LightmapTextureManager.class)
+public abstract class LightmapTextureManagerMixin {
+    // Luminance range (0..1). Below DARK_FLOOR = pure black. Above FULL_BRIGHT = untouched.
+    // Raise DARK_FLOOR for a harsher dark, lower it to see torch light farther out.
+    private static final float DARK_FLOOR = 0.03f;
+    private static final float FULL_BRIGHT = 0.14f;
+
+    @Shadow @Final private NativeImage image;
+
+    @Inject(method = "update", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/texture/NativeImageBackedTexture;upload()V"))
+    private void anvilhead$crushDarkness(float delta, CallbackInfo ci) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.world == null || !mc.world.getRegistryKey().equals(World.OVERWORLD)) return;
+
+        int floor = image.getColor(0, 0);
+        int fr = floor & 0xFF, fg = (floor >> 8) & 0xFF, fb = (floor >> 16) & 0xFF;
+
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                int c = image.getColor(x, y);
+                int r = Math.max(0, (c & 0xFF) - fr);
+                int g = Math.max(0, ((c >> 8) & 0xFF) - fg);
+                int b = Math.max(0, ((c >> 16) & 0xFF) - fb);
+
+                float lum = (r + g + b) / (3f * 255f);
+                float t = MathHelper.clamp((lum - DARK_FLOOR) / (FULL_BRIGHT - DARK_FLOOR), 0f, 1f);
+                float f = t * t * (3f - 2f * t); // smoothstep
+
+                image.setColor(x, y, (c & 0xFF000000)
+                        | ((int) (b * f) << 16) | ((int) (g * f) << 8) | (int) (r * f));
+            }
+        }
+    }
+}
+package com.example.anvilhead.net;
+
+import com.example.anvilhead.AnvilheadMod;
+import net.minecraft.network.RegistryByteBuf;
+import net.minecraft.network.codec.PacketCodec;
+import net.minecraft.network.codec.PacketCodecs;
+import net.minecraft.network.packet.CustomPayload;
+import net.minecraft.util.Identifier;
+
+/** Server -> client. phase 0 = start the cutscene, phase 1 = cutscene over, chase (and chase music) begins. */
+public record ChasePhasePayload(int entityId, int phase) implements CustomPayload {
+    public static final int CUTSCENE = 0;
+    public static final int CHASE = 1;
+
+    public static final CustomPayload.Id<ChasePhasePayload> ID =
+            new CustomPayload.Id<>(Identifier.of(AnvilheadMod.MOD_ID, "chase_phase"));
+
+    public static final PacketCodec<RegistryByteBuf, ChasePhasePayload> CODEC = PacketCodec.tuple(
+            PacketCodecs.VAR_INT, ChasePhasePayload::entityId,
+            PacketCodecs.VAR_INT, ChasePhasePayload::phase,
+            ChasePhasePayload::new);
+
+    @Override
+    public CustomPayload.Id<? extends CustomPayload> getId() { return ID; }
+}
+
+package com.example.anvilhead.net;
+
+import com.example.anvilhead.AnvilheadMod;
+import net.minecraft.network.RegistryByteBuf;
+import net.minecraft.network.codec.PacketCodec;
+import net.minecraft.network.codec.PacketCodecs;
+import net.minecraft.network.packet.CustomPayload;
+import net.minecraft.util.Identifier;
+
+/** Server -> client. START begins the eyes (seed decides where they appear), SHOCKWAVE ends them, CANCEL clears everything. */
+public record EyeEventPayload(int phase, int seed) implements CustomPayload {
+    public static final int START = 0;
+    public static final int SHOCKWAVE = 1;
+    public static final int CANCEL = 2;
+
+    public static final CustomPayload.Id<EyeEventPayload> ID =
+            new CustomPayload.Id<>(Identifier.of(AnvilheadMod.MOD_ID, "eye_event"));
+
+    public static final PacketCodec<RegistryByteBuf, EyeEventPayload> CODEC = PacketCodec.tuple(
+            PacketCodecs.VAR_INT, EyeEventPayload::phase,
+            PacketCodecs.VAR_INT, EyeEventPayload::seed,
+            EyeEventPayload::new);
+
+    @Override
+    public CustomPayload.Id<? extends CustomPayload> getId() { return ID; }
+}
+package com.example.anvilhead.event;
+
+import com.example.anvilhead.EyeSequence;
+import com.example.anvilhead.entity.AnvilheadSpawner;
+import com.example.anvilhead.net.EyeEventPayload;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvents;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.World;
+
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * The extremely rare "eyes" event.
+ *
+ * Every server tick, every Overworld player has a 1 in 1,000,000,000,000 chance of triggering it.
+ * Eyes then appear on that player's screen one after another (slow at first, then faster), until there are 50.
+ * Then a shockwave wipes them away and an Anvilhead is spawned ~50 blocks from the player, day or night,
+ * and it starts chasing immediately.
+ */
+public final class EyeEventManager {
+    /** 1-in-N per player per tick. */
+    public static final long ODDS = 1_000_000_000_000L;
+    private static final int SPAWN_RETRY_TICKS = 200;
+
+    private static final Map<UUID, Integer> ACTIVE = new HashMap<>();   // player -> ticks since the event started
+    private static final Map<UUID, Integer> PENDING = new HashMap<>();  // player -> ticks spent looking for a spawn spot
+
+    private EyeEventManager() {}
+
+    public static boolean isRunning() { return !ACTIVE.isEmpty(); }
+
+    /** Starts the event for this player. Returns false if it can't run right now (one at a time, Overworld, not Peaceful). */
+    public static boolean trigger(ServerPlayerEntity p) {
+        if (!ACTIVE.isEmpty() || p.isSpectator() || !p.isAlive()) return false;
+        if (!(p.getWorld() instanceof ServerWorld w)) return false;
+        if (!w.getRegistryKey().equals(World.OVERWORLD) || w.getDifficulty() == Difficulty.PEACEFUL) return false;
+        ACTIVE.put(p.getUuid(), 0);
+        ServerPlayNetworking.send(p, new EyeEventPayload(EyeEventPayload.START, w.random.nextInt()));
+        return true;
+    }
+
+    public static void tick(ServerWorld world) {
+        if (!world.getRegistryKey().equals(World.OVERWORLD)) return;
+        MinecraftServer server = world.getServer();
+
+        // the 1-in-a-trillion roll, every tick, for every player
+        if (ACTIVE.isEmpty()) {
+            for (ServerPlayerEntity p : world.getPlayers()) {
+                if (p.isSpectator() || !p.isAlive()) continue;
+                if (Math.floorMod(world.random.nextLong(), ODDS) == 0L && trigger(p)) break;
+            }
+        }
+
+        // running events
+        Iterator<Map.Entry<UUID, Integer>> it = ACTIVE.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, Integer> en = it.next();
+            ServerPlayerEntity p = server.getPlayerManager().getPlayer(en.getKey());
+            if (p == null || !p.isAlive() || p.isSpectator() || p.getWorld() != world
+                    || world.getDifficulty() == Difficulty.PEACEFUL) {
+                if (p != null) ServerPlayNetworking.send(p, new EyeEventPayload(EyeEventPayload.CANCEL, 0));
+                it.remove();
+                continue;
+            }
+            int t = en.getValue() + 1;
+            en.setValue(t);
+            if (t >= EyeSequence.shockwaveTick()) {
+                it.remove();
+                shockwave(world, p);
+            }
+        }
+
+        // spawn retries (if no valid spot was found the instant the shockwave hit)
+        Iterator<Map.Entry<UUID, Integer>> pit = PENDING.entrySet().iterator();
+        while (pit.hasNext()) {
+            Map.Entry<UUID, Integer> en = pit.next();
+            ServerPlayerEntity p = server.getPlayerManager().getPlayer(en.getKey());
+            if (p == null || !p.isAlive() || p.getWorld() != world) { pit.remove(); continue; }
+            if (AnvilheadSpawner.spawnChaser(world, p)) { pit.remove(); continue; }
+            en.setValue(en.getValue() + 1);
+            if (en.getValue() > SPAWN_RETRY_TICKS) pit.remove();
+        }
+    }
+
+    private static void shockwave(ServerWorld world, ServerPlayerEntity p) {
+        ServerPlayNetworking.send(p, new EyeEventPayload(EyeEventPayload.SHOCKWAVE, 0));
+        world.playSound(null, p.getX(), p.getY(), p.getZ(),
+                SoundEvents.ENTITY_WARDEN_SONIC_BOOM, SoundCategory.HOSTILE, 4.0f, 0.5f);
+        if (!AnvilheadSpawner.spawnChaser(world, p)) PENDING.put(p.getUuid(), 0);
+    }
+
+    public static void reset() {
+        ACTIVE.clear();
+        PENDING.clear();
+    }
